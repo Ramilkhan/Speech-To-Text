@@ -1,104 +1,143 @@
 import streamlit as st
 import requests
 import base64
-from io import BytesIO
-from pydub import AudioSegment
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, ClientSettings
+import numpy as np
 from openai import OpenAI
+from pydub import AudioSegment
+from io import BytesIO
 
 
-# -------------------------
-# CONFIG: API KEYS
-# -------------------------
+# -----------------------------
+# CONFIG KEYS
+# -----------------------------
 AZURE_KEY = "1f9hcUtjhvtdUv2nhtebXYAQ2SaWu8MjEyrZ0hH37jw1n4ETfgXVJQQJ99BKAC3pKaRXJ3w3AAAYACOG3AV4"
 AZURE_REGION = "eastasia"
 
 OPENROUTER_API_KEY = "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"
 
 
-# -------------------------
-# STREAMLIT PAGE
-# -------------------------
-st.set_page_config(page_title="Voice LLM Chat", page_icon="🎤", layout="centered")
-st.title("🎤 Voice Chat with Azure STT + OpenRouter LLM + Azure TTS")
+# -----------------------------
+# PAGE SETTINGS
+# -----------------------------
+st.set_page_config(page_title="Voice LLM", page_icon="🎤", layout="centered")
+st.title("🎤 Voice Chat with Azure + OpenRouter")
 
 
-# -------------------------
-# AUDIO RECORDING (WebRTC)
-# -------------------------
-st.subheader("🎙️ Record Your Question")
+# -----------------------------
+# JAVASCRIPT MICROPHONE RECORDER
+# -----------------------------
+record_script = """
+<script>
+let chunks = [];
+let recorder;
+let stream;
 
-webrtc_ctx = webrtc_streamer(
-    key="speech-record",
-    mode=WebRtcMode.SENDONLY,
-    client_settings=ClientSettings(
-        media_stream_constraints={"audio": True, "video": False}
-    )
-)
+async function startRecording() {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = e => chunks.push(e.data);
+    recorder.onstop = e => {
+        let blob = new Blob(chunks, { type: 'audio/wav' });
+        let reader = new FileReader();
+        reader.readAsDataURL(blob);
+        reader.onloadend = () => {
+            let base64 = reader.result.split(',')[1];
+            window.parent.postMessage({type: 'audio', data: base64}, '*');
+        };
+        chunks = [];
+    };
+    recorder.start();
+}
+
+function stopRecording() {
+    recorder.stop();
+    stream.getAudioTracks()[0].stop();
+}
+</script>
+
+<button onclick="startRecording()">🎙️ Start Recording</button>
+<button onclick="stopRecording()">⏹ Stop Recording</button>
+"""
+
+st.markdown(record_script, unsafe_allow_html=True)
 
 
-# -------------------------
-# Convert Recorded Audio → WAV
-# -------------------------
-def convert_to_wav(raw_audio):
-    audio = AudioSegment.from_file(BytesIO(raw_audio), format="webm")
-    wav_io = BytesIO()
-    audio.export(wav_io, format="wav")
-    return wav_io.getvalue()
+# -----------------------------
+# CAPTURE AUDIO FROM BROWSER
+# -----------------------------
+audio_base64 = st.sidebar.text_input("Browser Audio (internal use)")
+
+st.info("Click **Start Recording**, speak, then click **Stop Recording**.")
 
 
-# -------------------------
-# Azure Speech → Text (STT)
-# -------------------------
+# JS sends audio back here
+def js_listen():
+    from streamlit_javascript import st_javascript
+    return st_javascript("await new Promise(resolve => window.addEventListener('message', e => resolve(e.data)))")
+
+
+msg = js_listen()
+
+if msg and msg.get("type") == "audio":
+    audio_base64 = msg["data"]
+    st.sidebar.text_input("Browser Audio (internal)", value=audio_base64)
+
+
+# -----------------------------
+# Convert base64 → WAV bytes
+# -----------------------------
+def decode_audio(b64):
+    if not b64:
+        return None
+    return base64.b64decode(b64)
+
+
+# -----------------------------
+# Azure STT
+# -----------------------------
 def azure_stt(audio_bytes):
-    stt_url = f"https://{AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"
+    url = f"https://{AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"
 
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_KEY,
         "Content-Type": "audio/wav"
     }
 
-    response = requests.post(stt_url, headers=headers, data=audio_bytes)
+    res = requests.post(url, headers=headers, data=audio_bytes)
 
-    if response.status_code == 200:
-        return response.json().get("DisplayText", "")
+    if res.status_code == 200:
+        return res.json().get("DisplayText", "No text recognized")
     else:
-        st.error("Azure STT Error: " + response.text)
+        st.error(res.text)
         return ""
 
 
-# -------------------------
-# LLM via OpenRouter (YOUR CODE)
-# -------------------------
+# -----------------------------
+# LLM (OpenRouter)
+# -----------------------------
 def ask_llm(prompt):
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
+        api_key=OPENROUTER_API_KEY
     )
 
     completion = client.chat.completions.create(
-        extra_headers={
-            "HTTP-Referer": "http://localhost",  
-            "X-Title": "Voice LLM App",
-        },
         model="google/gemma-3n-e4b-it:free",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
+        messages=[{"role": "user", "content": prompt}]
     )
 
     return completion.choices[0].message.content
 
 
-# -------------------------
-# Azure Text → Speech (TTS)
-# -------------------------
+# -----------------------------
+# Azure TTS
+# -----------------------------
 def azure_tts(text):
-    tts_url = f"https://{AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
+    url = f"https://{AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
 
     ssml = f"""
     <speak version='1.0'>
-        <voice xml:lang='en-US' name='en-US-AriaNeural'>{text}</voice>
+        <voice name='en-US-AriaNeural'>{text}</voice>
     </speak>
     """
 
@@ -108,53 +147,33 @@ def azure_tts(text):
         "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3"
     }
 
-    response = requests.post(tts_url, headers=headers, data=ssml.encode())
+    res = requests.post(url, headers=headers, data=ssml)
 
-    if response.status_code == 200:
-        return response.content
+    return res.content if res.status_code == 200 else None
+
+
+# -----------------------------
+# PROCESS BUTTON
+# -----------------------------
+if st.button("Process Audio"):
+
+    if not audio_base64:
+        st.warning("Record something first!")
     else:
-        st.error("Azure TTS Error: " + response.text)
-        return None
+        audio_bytes = decode_audio(audio_base64)
 
+        st.audio(audio_bytes, format="audio/wav")
 
-# -------------------------
-# MAIN LOGIC
-# -------------------------
-st.write("---")
-st.subheader("🎧 Process Your Voice Input")
+        # Speech → Text
+        user_text = azure_stt(audio_bytes)
+        st.success(f"🗣️ You said: {user_text}")
 
-if st.button("➡️ Convert Speech → LLM → Speech"):
+        # LLM Answer
+        llm_answer = ask_llm(user_text)
+        st.info(f"🤖 LLM: {llm_answer}")
 
-    if not webrtc_ctx or not webrtc_ctx.audio_receiver:
-        st.warning("Please record your voice first.")
-    else:
-        audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=2)
-
-        if not audio_frames:
-            st.warning("No audio detected.")
-        else:
-            raw_audio = audio_frames[0].to_ndarray().tobytes()
-
-            # Convert → WAV
-            wav_audio = convert_to_wav(raw_audio)
-            st.audio(wav_audio, format="audio/wav")
-
-            # 1️⃣ Speech → Text
-            user_text = azure_stt(wav_audio)
-            st.write("### 📝 You said:")
-            st.success(user_text)
-
-            # 2️⃣ LLM Response
-            llm_reply = ask_llm(user_text)
-            st.write("### 🤖 LLM Answer:")
-            st.info(llm_reply)
-
-            # 3️⃣ Text → Speech
-            speech_audio = azure_tts(llm_reply)
-            if speech_audio:
-                st.audio(speech_audio, format="audio/mp3")
-                st.download_button("Download MP3", speech_audio, "llm_answer.mp3")
-
-
-st.write("---")
-st.write("Built with 💚 using Azure + OpenRouter + Streamlit")
+        # Text → Speech
+        speech_audio = azure_tts(llm_answer)
+        if speech_audio:
+            st.audio(speech_audio, format="audio/mp3")
+            st.download_button("Download Answer", speech_audio, "llm_answer.mp3")
