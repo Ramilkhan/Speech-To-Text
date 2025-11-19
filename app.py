@@ -1,78 +1,109 @@
 import streamlit as st
-import requests
+import streamlit.components.v1 as components
 import base64
+import requests
 from openai import OpenAI
 
-
 # -----------------------------
-# CONFIG KEYS
+# CONFIG
 # -----------------------------
 AZURE_KEY = "1f9hcUtjhvtdUv2nhtebXYAQ2SaWu8MjEyrZ0hH37jw1n4ETfgXVJQQJ99BKAC3pKaRXJ3w3AAAYACOG3AV4"
 AZURE_REGION = "eastasia"
 OPENROUTER_API_KEY = "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"
 
-
-# -----------------------------
-# PAGE SETTINGS
-# -----------------------------
-st.set_page_config(page_title="Voice LLM", page_icon="🎤", layout="centered")
+st.set_page_config(page_title="Voice Chat", layout="centered")
 st.title("🎤 Voice Chat (Azure STT + LLM + Azure TTS)")
 
+# Placeholder for audio output
+audio_placeholder = st.empty()
+
+# Hidden HTML Recorder
+components.html(
+    """
+    <html>
+    <body>
+    <button onclick="startRecording()">🎙️ Start Recording</button>
+    <button onclick="stopRecording()">⏹ Stop Recording</button>
+
+    <script>
+    let recorder;
+    let audioChunks = [];
+
+    async function startRecording() {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recorder = new MediaRecorder(stream);
+
+        recorder.ondataavailable = e => audioChunks.push(e.data);
+
+        recorder.onstop = e => {
+            let blob = new Blob(audioChunks, { type: 'audio/wav' });
+            audioChunks = [];
+
+            let reader = new FileReader();
+            reader.readAsDataURL(blob);
+            reader.onloadend = () => {
+                const base64data = reader.result.split(',')[1];
+                window.parent.postMessage({type: "audio", data: base64data}, "*");
+            };
+        };
+
+        recorder.start();
+    }
+
+    function stopRecording() {
+        recorder.stop();
+    }
+
+    </script>
+    </body>
+    </html>
+    """,
+    height=200,
+)
 
 # -----------------------------
-# JAVASCRIPT MICROPHONE RECORDER
+# Listening for browser messages
 # -----------------------------
+audio_b64 = st.experimental_get_query_params().get("audio", [None])[0]
+
+# Use session_state to capture audio
+if "audio_input" not in st.session_state:
+    st.session_state.audio_input = None
+
+
+def capture_browser_audio():
+    """Reads the audio message posted by HTML."""
+    msg = st.experimental_get_query_params()
+    return None
+
+
+# This listens to frontend messages
+message = st.experimental_get_query_params()
+
+# Streamlit hack to capture postMessage
 st.markdown("""
 <script>
-let chunks = [];
-let recorder;
-let stream;
-
-async function startRecording() {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = e => chunks.push(e.data);
-    recorder.onstop = e => {
-        let blob = new Blob(chunks, { type: 'audio/wav' });
-        let reader = new FileReader();
-        reader.readAsDataURL(blob);
-        reader.onloadend = () => {
-            let base64 = reader.result.split(',')[1];
-            window.parent.postMessage({type: 'audio', data: base64}, '*');
-        };
-        chunks = [];
-    };
-    recorder.start();
-}
-
-function stopRecording() {
-    recorder.stop();
-    stream.getAudioTracks()[0].stop();
-}
+window.addEventListener("message", (e) => {
+    const audio = e.data;
+    if (audio.type === "audio") {
+        const urlParams = new URLSearchParams(window.location.search);
+        urlParams.set("audio", audio.data);
+        window.location.search = urlParams.toString();
+    }
+});
 </script>
-
-<button onclick="startRecording()">🎙️ Start Recording</button>
-<button onclick="stopRecording()">⏹ Stop Recording</button>
 """, unsafe_allow_html=True)
 
 
 # -----------------------------
-# CAPTURE BASE64 AUDIO
+# If audio is received
 # -----------------------------
-def get_audio_base64():
-    from streamlit_javascript import st_javascript
-    msg = st_javascript("await new Promise(resolve => window.addEventListener('message', e => resolve(e.data)))")
-    if msg and msg.get("type") == "audio":
-        return msg["data"]
-    return None
+audio_param = st.experimental_get_query_params().get("audio", [None])[0]
 
-
-audio_b64 = get_audio_base64()
-
-if audio_b64:
-    st.success("Audio recorded!")
-    audio_bytes = base64.b64decode(audio_b64)
-    st.audio(audio_bytes, format="audio/wav")
+if audio_param:
+    st.session_state.audio_input = base64.b64decode(audio_param)
+    st.success("Audio recorded successfully!")
+    audio_placeholder.audio(st.session_state.audio_input, format="audio/wav")
 
 
 # -----------------------------
@@ -86,27 +117,25 @@ def azure_stt(audio_bytes):
         "Content-Type": "audio/wav"
     }
 
-    response = requests.post(url, headers=headers, data=audio_bytes)
+    resp = requests.post(url, headers=headers, data=audio_bytes)
 
-    if response.status_code == 200:
-        return response.json().get("DisplayText", "")
-    else:
-        st.error(response.text)
-        return ""
+    if resp.status_code == 200:
+        return resp.json().get("DisplayText", "")
+    return "STT Error: " + resp.text
 
 
 # -----------------------------
-# OpenRouter LLM
+# LLM response
 # -----------------------------
-def ask_llm(prompt):
+def ask_llm(text):
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY
+        api_key=OPENROUTER_API_KEY,
     )
 
     completion = client.chat.completions.create(
         model="google/gemma-3n-e4b-it:free",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": text}]
     )
 
     return completion.choices[0].message.content
@@ -119,10 +148,10 @@ def azure_tts(text):
     url = f"https://{AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
 
     ssml = f"""
-<speak version='1.0'>
-    <voice name='en-US-AriaNeural'>{text}</voice>
-</speak>
-"""
+    <speak version='1.0'>
+        <voice name='en-US-AriaNeural'>{text}</voice>
+    </speak>
+    """
 
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_KEY,
@@ -130,9 +159,8 @@ def azure_tts(text):
         "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3"
     }
 
-    response = requests.post(url, headers=headers, data=ssml)
-
-    return response.content if response.status_code == 200 else None
+    r = requests.post(url, headers=headers, data=ssml)
+    return r.content if r.status_code == 200 else None
 
 
 # -----------------------------
@@ -140,23 +168,21 @@ def azure_tts(text):
 # -----------------------------
 if st.button("Process Audio"):
 
-    if not audio_b64:
-        st.warning("Record something first!")
+    if not st.session_state.audio_input:
+        st.warning("Please record audio first.")
     else:
-        audio_bytes = base64.b64decode(audio_b64)
-
         # Speech → Text
-        text = azure_stt(audio_bytes)
+        text = azure_stt(st.session_state.audio_input)
         st.write("### 🗣️ You said:")
         st.success(text)
 
-        # LLM Response
+        # LLM → Answer
         answer = ask_llm(text)
-        st.write("### 🤖 LLM Answer:")
+        st.write("### 🤖 AI Response:")
         st.info(answer)
 
         # Text → Speech
         audio = azure_tts(answer)
         if audio:
             st.audio(audio, format="audio/mp3")
-            st.download_button("Download MP3", audio, "response.mp3")
+            st.download_button("Download MP3", audio, "answer.mp3")
