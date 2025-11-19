@@ -1,10 +1,7 @@
 import streamlit as st
 import requests
 import base64
-import numpy as np
 from openai import OpenAI
-from pydub import AudioSegment
-from io import BytesIO
 
 
 # -----------------------------
@@ -12,7 +9,6 @@ from io import BytesIO
 # -----------------------------
 AZURE_KEY = "1f9hcUtjhvtdUv2nhtebXYAQ2SaWu8MjEyrZ0hH37jw1n4ETfgXVJQQJ99BKAC3pKaRXJ3w3AAAYACOG3AV4"
 AZURE_REGION = "eastasia"
-
 OPENROUTER_API_KEY = "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"
 
 
@@ -20,13 +16,13 @@ OPENROUTER_API_KEY = "sk-or-v1-0b398582a4796fcf70a1a9d6c8e595aad86fd2a9fdd7b7214
 # PAGE SETTINGS
 # -----------------------------
 st.set_page_config(page_title="Voice LLM", page_icon="🎤", layout="centered")
-st.title("🎤 Voice Chat with Azure + OpenRouter")
+st.title("🎤 Voice Chat (Azure STT + LLM + Azure TTS)")
 
 
 # -----------------------------
 # JAVASCRIPT MICROPHONE RECORDER
 # -----------------------------
-record_script = """
+st.markdown("""
 <script>
 let chunks = [];
 let recorder;
@@ -57,39 +53,26 @@ function stopRecording() {
 
 <button onclick="startRecording()">🎙️ Start Recording</button>
 <button onclick="stopRecording()">⏹ Stop Recording</button>
-"""
-
-st.markdown(record_script, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 
 # -----------------------------
-# CAPTURE AUDIO FROM BROWSER
+# CAPTURE BASE64 AUDIO
 # -----------------------------
-audio_base64 = st.sidebar.text_input("Browser Audio (internal use)")
-
-st.info("Click **Start Recording**, speak, then click **Stop Recording**.")
-
-
-# JS sends audio back here
-def js_listen():
+def get_audio_base64():
     from streamlit_javascript import st_javascript
-    return st_javascript("await new Promise(resolve => window.addEventListener('message', e => resolve(e.data)))")
+    msg = st_javascript("await new Promise(resolve => window.addEventListener('message', e => resolve(e.data)))")
+    if msg and msg.get("type") == "audio":
+        return msg["data"]
+    return None
 
 
-msg = js_listen()
+audio_b64 = get_audio_base64()
 
-if msg and msg.get("type") == "audio":
-    audio_base64 = msg["data"]
-    st.sidebar.text_input("Browser Audio (internal)", value=audio_base64)
-
-
-# -----------------------------
-# Convert base64 → WAV bytes
-# -----------------------------
-def decode_audio(b64):
-    if not b64:
-        return None
-    return base64.b64decode(b64)
+if audio_b64:
+    st.success("Audio recorded!")
+    audio_bytes = base64.b64decode(audio_b64)
+    st.audio(audio_bytes, format="audio/wav")
 
 
 # -----------------------------
@@ -103,17 +86,17 @@ def azure_stt(audio_bytes):
         "Content-Type": "audio/wav"
     }
 
-    res = requests.post(url, headers=headers, data=audio_bytes)
+    response = requests.post(url, headers=headers, data=audio_bytes)
 
-    if res.status_code == 200:
-        return res.json().get("DisplayText", "No text recognized")
+    if response.status_code == 200:
+        return response.json().get("DisplayText", "")
     else:
-        st.error(res.text)
+        st.error(response.text)
         return ""
 
 
 # -----------------------------
-# LLM (OpenRouter)
+# OpenRouter LLM
 # -----------------------------
 def ask_llm(prompt):
     client = OpenAI(
@@ -136,10 +119,10 @@ def azure_tts(text):
     url = f"https://{AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
 
     ssml = f"""
-    <speak version='1.0'>
-        <voice name='en-US-AriaNeural'>{text}</voice>
-    </speak>
-    """
+<speak version='1.0'>
+    <voice name='en-US-AriaNeural'>{text}</voice>
+</speak>
+"""
 
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_KEY,
@@ -147,9 +130,9 @@ def azure_tts(text):
         "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3"
     }
 
-    res = requests.post(url, headers=headers, data=ssml)
+    response = requests.post(url, headers=headers, data=ssml)
 
-    return res.content if res.status_code == 200 else None
+    return response.content if response.status_code == 200 else None
 
 
 # -----------------------------
@@ -157,23 +140,23 @@ def azure_tts(text):
 # -----------------------------
 if st.button("Process Audio"):
 
-    if not audio_base64:
+    if not audio_b64:
         st.warning("Record something first!")
     else:
-        audio_bytes = decode_audio(audio_base64)
-
-        st.audio(audio_bytes, format="audio/wav")
+        audio_bytes = base64.b64decode(audio_b64)
 
         # Speech → Text
-        user_text = azure_stt(audio_bytes)
-        st.success(f"🗣️ You said: {user_text}")
+        text = azure_stt(audio_bytes)
+        st.write("### 🗣️ You said:")
+        st.success(text)
 
-        # LLM Answer
-        llm_answer = ask_llm(user_text)
-        st.info(f"🤖 LLM: {llm_answer}")
+        # LLM Response
+        answer = ask_llm(text)
+        st.write("### 🤖 LLM Answer:")
+        st.info(answer)
 
         # Text → Speech
-        speech_audio = azure_tts(llm_answer)
-        if speech_audio:
-            st.audio(speech_audio, format="audio/mp3")
-            st.download_button("Download Answer", speech_audio, "llm_answer.mp3")
+        audio = azure_tts(answer)
+        if audio:
+            st.audio(audio, format="audio/mp3")
+            st.download_button("Download MP3", audio, "response.mp3")
