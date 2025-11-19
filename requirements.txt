@@ -1,5 +1,5 @@
 streamlit==1.36.0
 requests==2.32.3
 openai==1.35.3
-numpy==1.26.4
 pydub==0.25.1
+numpy==1.26.4
