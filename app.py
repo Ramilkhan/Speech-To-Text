@@ -1,155 +1,108 @@
 import streamlit as st
-import streamlit.components.v1 as components
+import azure.cognitiveservices.speech as speechsdk
+import openai
 import base64
-import requests
-from openai import OpenAI
+import tempfile
 
-# =========================================
-# 🔐 CONFIG (PUT YOUR KEYS HERE)
-# =========================================
-AZURE_KEY = "1f9hcUtjhvtdUv2nhtebXYAQ2SaWu8MjEyrZ0hH37jw1n4ETfgXVJQQJ99BKAC3pKaRXJ3w3AAAYACOG3AV4"
-AZURE_REGION = "eastasia"
+# ---------------------
+#  CONFIGURATION
+# ---------------------
 
-OPENROUTER_API_KEY = "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"
+AZURE_SPEECH_KEY = "1f9hcUtjhvtdUv2nhtebXYAQ2SaWu8MjEyrZ0hH37jw1n4ETfgXVJQQJ99BKAC3pKaRXJ3w3AAAYACOG3AV4"
+AZURE_SPEECH_REGION = "eastasia"
 
-# =========================================
-# STREAMLIT UI
-# =========================================
-st.set_page_config(page_title="Voice Chat AI", layout="centered")
-st.title("🎤 Voice Chat (Azure STT + LLM + Azure TTS)")
+OPENAI_API_KEY = "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"
 
+openai.api_key = OPENAI_API_KEY
 
-# =========================================
-# AUDIO RECORDER COMPONENT (WORKS ON STREAMLIT CLOUD)
-# =========================================
-audio_component = components.declare_component(
-    "audio_recorder",
-    path="none",
-)
+st.set_page_config(page_title="Voice AI Chat", layout="wide")
 
-html_code = """
-<div>
-  <button onclick="startRec()">🎙️ Start Recording</button>
-  <button onclick="stopRec()">⏹ Stop Recording</button>
-</div>
+# Black theme UI
+st.markdown("""
+<style>
+body { background-color: #000000; }
+.sidebar .sidebar-content { background-color: #111; color: white; }
+.css-18e3th9 { background-color: #000 !important; }
+.css-1d391kg { background-color: #000 !important; }
+h1, h2, p, label { color: white !important; }
+</style>
+""", unsafe_allow_html=True)
 
-<script>
-let mediaRecorder;
-let chunks = [];
+st.title("🎤 Voice AI Assistant")
+st.write("Ask anything using your **voice** and get a **spoken answer**.")
 
-async function startRec() {
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-    mediaRecorder = new MediaRecorder(stream);
+# ---------------------
+#  SPEECH TO TEXT
+# ---------------------
 
-    mediaRecorder.ondataavailable = e => chunks.push(e.data);
-
-    mediaRecorder.onstop = e => {
-        let blob = new Blob(chunks, {type:'audio/wav'});
-        chunks = [];
-
-        let reader = new FileReader();
-        reader.onloadend = () => {
-            let base64data = reader.result.split(",")[1];
-            Streamlit.setComponentValue(base64data);
-        };
-        reader.readAsDataURL(blob);
-    };
-
-    mediaRecorder.start();
-}
-
-function stopRec() {
-    if (mediaRecorder) mediaRecorder.stop();
-}
-</script>
-"""
-
-# Get audio from component (base64 encoded WAV)
-audio_b64 = audio_component(html_code, default=None)
-
-if audio_b64:
-    st.success("Audio recorded successfully!")
-    audio_bytes = base64.b64decode(audio_b64)
-    st.audio(audio_bytes, format="audio/wav")
-    st.session_state.audio = audio_bytes
-
-
-# =========================================
-# FUNCTIONS (Azure STT, LLM, Azure TTS)
-# =========================================
-def azure_stt(audio_bytes):
-    url = f"https://{AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1"
-    headers = {
-        "Ocp-Apim-Subscription-Key": AZURE_KEY,
-        "Content-Type": "audio/wav"
-    }
-    r = requests.post(url, headers=headers, data=audio_bytes)
-    if r.status_code == 200:
-        return r.json().get("DisplayText", "")
-    return "STT ERROR: " + r.text
-
-
-def ask_llm(user_text):
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
+def azure_stt(audio_file_path):
+    speech_config = speechsdk.SpeechConfig(
+        subscription=AZURE_SPEECH_KEY,
+        region=AZURE_SPEECH_REGION
     )
+    audio_config = speechsdk.audio.AudioConfig(filename=audio_file_path)
+    speech_recognizer = speechsdk.SpeechRecognizer(speech_config, audio_config)
 
-    result = client.chat.completions.create(
-        model="google/gemma-3n-e4b-it:free",
-        messages=[{"role": "user", "content": user_text}]
+    result = speech_recognizer.recognize_once()
+    return result.text
+
+
+# ---------------------
+#  LLM RESPONSE
+# ---------------------
+
+def ask_llm(question):
+    response = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": question}]
     )
-    return result.choices[0].message.content
+    return response.choices[0].message["content"]
 
+
+# ---------------------
+#  TEXT TO SPEECH
+# ---------------------
 
 def azure_tts(text):
-    url = f"https://{AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1"
+    speech_config = speechsdk.SpeechConfig(
+        subscription=AZURE_SPEECH_KEY,
+        region=AZURE_SPEECH_REGION
+    )
+    speech_config.speech_synthesis_voice_name = "en-US-AriaNeural"
 
-    ssml = f"""
-    <speak version='1.0'>
-        <voice name='en-US-AriaNeural'>{text}</voice>
-    </speak>
-    """
-
-    headers = {
-        "Ocp-Apim-Subscription-Key": AZURE_KEY,
-        "Content-Type": "application/ssml+xml",
-        "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
-    }
-
-    r = requests.post(url, headers=headers, data=ssml)
-    if r.status_code == 200:
-        return r.content
-    else:
-        return None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio:
+        audio_output = speechsdk.audio.AudioConfig(filename=tmp_audio.name)
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=speech_config,
+            audio_config=audio_output
+        )
+        synthesizer.speak_text_async(text).get()
+        return tmp_audio.name
 
 
-# =========================================
-# MAIN BUTTON: PROCESS AUDIO
-# =========================================
-st.write("")
+# ---------------------
+#  UI - Record Voice
+# ---------------------
 
-if st.button("Process Audio"):
+audio_bytes = st.audio_input("Record your question")
 
-    if "audio" not in st.session_state:
-        st.warning("Please record audio first.")
-        st.stop()
+if audio_bytes:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(audio_bytes.read())
+        audio_path = tmp.name
 
-    st.info("🔄 Converting speech → text...")
-    text = azure_stt(st.session_state.audio)
-    st.write("### 🗣️ You said:")
-    st.success(text)
+    st.write("🎙️ **Recognizing speech...**")
+    text = azure_stt(audio_path)
+    st.success(f"**You said:** {text}")
 
-    st.info("🤖 Generating LLM response...")
+    st.write("🤖 **Thinking...**")
     answer = ask_llm(text)
-    st.write("### 🤖 AI says:")
     st.info(answer)
 
-    st.info("🔊 Generating spoken audio...")
-    audio_mp3 = azure_tts(answer)
+    st.write("🔊 **Generating voice reply...**")
+    speech_file = azure_tts(answer)
 
-    if audio_mp3:
-        st.audio(audio_mp3, format="audio/mp3")
-        st.download_button("Download MP3", audio_mp3, "response.mp3")
-    else:
-        st.error("TTS failed. Check Azure key or region.")
+    with open(speech_file, "rb") as f:
+        audio_base64 = base64.b64encode(f.read()).decode()
+
+    st.audio(speech_file, format="audio/wav")
