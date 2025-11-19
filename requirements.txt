@@ -1,0 +1,8 @@
+streamlit==1.36.0
+streamlit-webrtc==0.47.1
+requests==2.32.3
+pydub==0.25.1
+openai==1.35.3
+numpy==1.26.4
+av==11.0.0
+ffmpeg-python==0.2.0
